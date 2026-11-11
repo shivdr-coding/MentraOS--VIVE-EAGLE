@@ -16,6 +16,7 @@ prefix unless the hardware is validated and listed here.
 | Mentra Mach 1 | Full | Not available | Partial* | Not available | Not available |
 | Vuzix Z100 | Full | Not available | Partial* | Not available | Not available |
 | Xingyi AR99 | Full | Not available | Full | Not available | Not available |
+| HTC VIVE Eagle | Not available | Not available | Full | Full | Full |
 
 * Microphone support via connected phone's microphone.
 

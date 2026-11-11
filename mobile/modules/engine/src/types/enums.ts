@@ -12,6 +12,7 @@ export enum DeviceTypes {
   NEX = "Mentra Display",
   FRAME = "Brilliant Frame",
   NIMO = "NIMO",
+  EAGLE = "VIVE Eagle",
 }
 
 export enum ControllerTypes {
