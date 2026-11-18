@@ -103,16 +103,38 @@ class ViveEagle : SGCManager() {
     private val viveGlass = ViveGlass()
     private var adapterReady = false
 
-    /** True between connectById() and disconnect()/cleanup(). Late SDK callbacks after a
+    /** DeviceStore connection fields and the session guard: late SDK callbacks after a
      *  disconnect must not overwrite DeviceStore state that a newer SGC may already own. */
-    @Volatile private var sessionActive = false
+    private val connection =
+        EagleConnectionTracker(
+            object : EagleConnectionTracker.Listener {
+                override fun onGlassesConnected() = onConnected()
+
+                override fun onGlassesLost() = onDisconnected()
+
+                override fun onConnectFailed(failure: EagleLinkEvent.Failed) {
+                    Bridge.log("$TAG: ${failure.logMessage}")
+                    Bridge.sendPairFailureEvent("errors:pairingCouldNotStart", failure.code)
+                }
+            }
+        )
 
     @Volatile private var preferredLocale: Locale = Locale.getDefault()
 
     // Camera
-    private val photoLock = Any()
-    private var pendingPhoto: PhotoRequest? = null
-    private var captureTimeout: Runnable? = null
+    private val photoSlot =
+        EaglePhotoSlot<PhotoRequest>(
+            object : EaglePhotoSlot.Scheduler {
+                override fun schedule(delayMs: Long, task: Runnable) {
+                    mainHandler.postDelayed(task, delayMs)
+                }
+
+                override fun cancel(task: Runnable) {
+                    mainHandler.removeCallbacks(task)
+                }
+            },
+            CAPTURE_TIMEOUT_MS
+        )
 
     // Microphone
     /** What MentraOS asked for; re-applied when the glasses (re)connect. */
@@ -212,46 +234,16 @@ class ViveEagle : SGCManager() {
     // Connection
     // =====================================================================================
 
-    /** HTC's ConnectionState and MentraOS's ConnTypes are separate enums; map explicitly. */
+    /** Mapping (EagleConnectionMapping) and DeviceStore writes live in EagleConnectionTracker. */
     private fun handleConnectionState(state: ConnectionState?) {
         Bridge.log("$TAG: onConnectionStateChanged state=$state")
-        if (!sessionActive) {
+        if (!connection.onConnectionState(state?.name)) {
             Bridge.log("$TAG: ignoring connection state after disconnect")
-            return
-        }
-        when (state) {
-            ConnectionState.CONNECTING -> {
-                DeviceStore.apply("glasses", "connected", false)
-                DeviceStore.apply("glasses", "fullyBooted", false)
-                DeviceStore.apply("glasses", "connectionState", ConnTypes.CONNECTING)
-            }
-            ConnectionState.CONNECTED -> onConnected()
-            ConnectionState.DISCONNECTED -> onDisconnected()
-            ConnectionState.ERROR_UNREGISTER_APP -> {
-                // Only the real ViveGlassKit path; the simulator never reports it.
-                Bridge.log("$TAG: HTC rejected this app: not registered with VIVE Connect")
-                Bridge.sendPairFailureEvent("errors:pairingCouldNotStart", "ERROR_UNREGISTER_APP")
-                onDisconnected()
-            }
-            ConnectionState.ERROR_UNSUPPORTED_ROM_VERSION -> {
-                Bridge.log("$TAG: glasses firmware (ROM) not supported by this SDK version")
-                Bridge.sendPairFailureEvent("errors:pairingCouldNotStart", "ERROR_UNSUPPORTED_ROM_VERSION")
-                onDisconnected()
-            }
-            else -> {
-                // ConnectionState.ERROR, null, or a value newer than SDK 0.6.1.
-                Bridge.log("$TAG: connection error state=$state")
-                Bridge.sendPairFailureEvent("errors:pairingCouldNotStart", state?.name ?: "ERROR")
-                onDisconnected()
-            }
         }
     }
 
+    /** Side effects of a connection; DeviceStore already says connected (see markConnected). */
     private fun onConnected() {
-        DeviceStore.apply("glasses", "connected", true)
-        DeviceStore.apply("glasses", "fullyBooted", true)
-        DeviceStore.apply("glasses", "connectionState", ConnTypes.CONNECTED)
-
         // HTC's sample reads the locale off the main thread; with ViveGlassKit it goes over
         // the link and may block.
         scope.launch {
@@ -266,13 +258,10 @@ class ViveEagle : SGCManager() {
         if (micWanted) startMic()
     }
 
+    /** Side effects of losing the glasses; DeviceStore is updated after (see markDisconnected). */
     private fun onDisconnected() {
         stopMicLocal()
         failPendingPhoto("GLASSES_DISCONNECTED", "VIVE Eagle disconnected before the photo arrived")
-        DeviceStore.apply("glasses", "micEnabled", false)
-        DeviceStore.apply("glasses", "connected", false)
-        DeviceStore.apply("glasses", "fullyBooted", false)
-        DeviceStore.apply("glasses", "connectionState", ConnTypes.DISCONNECTED)
     }
 
     /** Assigns ViveGlass.adapter. Main thread only (the debug simulator creates TTS/STT objects). */
@@ -304,26 +293,25 @@ class ViveEagle : SGCManager() {
 
     override fun connectById(id: String) {
         Bridge.log("$TAG: connectById($id)")
-        sessionActive = true
-        DeviceStore.apply("glasses", "connectionState", ConnTypes.CONNECTING)
+        connection.beginSession()
         mainHandler.post {
-            if (!sessionActive) return@post
+            if (!connection.sessionActive) return@post
             val context =
                 try {
                     Bridge.getContext().applicationContext
                 } catch (e: IllegalStateException) {
                     Bridge.log("$TAG: no app context, cannot connect")
-                    onDisconnected()
+                    connection.markDisconnected()
                     return@post
                 }
             if (!ensureAdapter(context)) {
                 Bridge.sendPairFailureEvent("errors:pairingCouldNotStart", "ADAPTER_SETUP_FAILED")
-                onDisconnected()
+                connection.markDisconnected()
                 return@post
             }
             if (viveGlass.isConnected) {
                 Bridge.log("$TAG: already connected")
-                onConnected()
+                connection.markConnected()
                 return@post
             }
             // Documented as callback-based: the result arrives in onConnectionStateChanged.
@@ -334,23 +322,23 @@ class ViveEagle : SGCManager() {
             } catch (e: ViveGlassError.UnRegisteredAppException) {
                 Bridge.log("$TAG: connect: app not registered with HTC")
                 Bridge.sendPairFailureEvent("errors:pairingCouldNotStart", "ERROR_UNREGISTER_APP")
-                onDisconnected()
+                connection.markDisconnected()
             } catch (e: ViveGlassError.NoPairedGlassesException) {
                 Bridge.log("$TAG: connect: no glasses paired in VIVE Connect")
                 Bridge.sendPairFailureEvent("errors:pairingCouldNotStart", "NO_PAIRED_GLASSES")
-                onDisconnected()
+                connection.markDisconnected()
             } catch (e: ViveGlassError.GlassesPermissionDeniedException) {
                 Bridge.log("$TAG: connect: permission denied")
                 Bridge.sendPairFailureEvent("errors:pairingCouldNotStart", "PERMISSION_DENIED")
-                onDisconnected()
+                connection.markDisconnected()
             } catch (e: ViveGlassError.GlassesNotWornException) {
                 Bridge.log("$TAG: connect: glasses not worn")
                 Bridge.sendPairFailureEvent("errors:pairingCouldNotStart", "GLASSES_NOT_WORN")
-                onDisconnected()
+                connection.markDisconnected()
             } catch (e: Exception) {
                 Bridge.log("$TAG: connect failed: ${e.message}")
                 Bridge.sendPairFailureEvent("errors:pairingCouldNotStart", "ERROR")
-                onDisconnected()
+                connection.markDisconnected()
             }
         }
     }
@@ -359,7 +347,7 @@ class ViveEagle : SGCManager() {
         Bridge.log("$TAG: disconnect")
         stopMic()
         failPendingPhoto("GLASSES_DISCONNECTED", "Disconnected from VIVE Eagle")
-        sessionActive = false
+        connection.endSession()
         scope.coroutineContext.cancelChildren()
         if (adapterReady) {
             try {
@@ -368,10 +356,7 @@ class ViveEagle : SGCManager() {
                 Bridge.log("$TAG: disconnect failed: ${e.message}")
             }
         }
-        DeviceStore.apply("glasses", "micEnabled", false)
-        DeviceStore.apply("glasses", "connected", false)
-        DeviceStore.apply("glasses", "fullyBooted", false)
-        DeviceStore.apply("glasses", "connectionState", ConnTypes.DISCONNECTED)
+        connection.publishDisconnected()
     }
 
     override fun forget() {
@@ -466,17 +451,13 @@ class ViveEagle : SGCManager() {
             Bridge.sendPhotoError(request.requestId, "GLASSES_NOT_CONNECTED", "VIVE Eagle is not connected")
             return
         }
-        synchronized(photoLock) {
-            if (pendingPhoto != null) {
-                Bridge.sendPhotoError(request.requestId, "CAMERA_BUSY", "A VIVE Eagle photo is already in progress")
-                return
+        val accepted =
+            photoSlot.begin(request) { timedOut ->
+                reportPhotoFailure(timedOut, "CAPTURE_TIMEOUT", "VIVE Eagle did not return the photo in time")
             }
-            pendingPhoto = request
-            val timeout = Runnable {
-                failPendingPhoto("CAPTURE_TIMEOUT", "VIVE Eagle did not return the photo in time")
-            }
-            captureTimeout = timeout
-            mainHandler.postDelayed(timeout, CAPTURE_TIMEOUT_MS)
+        if (!accepted) {
+            Bridge.sendPhotoError(request.requestId, "CAMERA_BUSY", "A VIVE Eagle photo is already in progress")
+            return
         }
         if (!hasPermission(Permission.CAMERA)) {
             failPendingPhoto("PERMISSION_DENIED", "VIVE Eagle camera permission not granted")
@@ -496,18 +477,14 @@ class ViveEagle : SGCManager() {
         }
     }
 
-    private fun takePendingPhoto(): PhotoRequest? {
-        synchronized(photoLock) {
-            val request = pendingPhoto
-            pendingPhoto = null
-            captureTimeout?.let { mainHandler.removeCallbacks(it) }
-            captureTimeout = null
-            return request
-        }
-    }
+    private fun takePendingPhoto(): PhotoRequest? = photoSlot.take()
 
     private fun failPendingPhoto(errorCode: String, message: String) {
         val request = takePendingPhoto() ?: return
+        reportPhotoFailure(request, errorCode, message)
+    }
+
+    private fun reportPhotoFailure(request: PhotoRequest, errorCode: String, message: String) {
         Bridge.log("$TAG: photo ${request.requestId} failed: $errorCode $message")
         Bridge.sendPhotoError(request.requestId, errorCode, message)
     }
@@ -551,7 +528,7 @@ class ViveEagle : SGCManager() {
             }
 
         // A plain thread rather than `scope`: disconnect() cancels the scope's children, and a
-        // photo already taken from pendingPhoto must still get a response.
+        // photo already taken from photoSlot must still get a response.
         Thread({
             if (request.save) saveRawCopy(context, request.requestId, heic)
             val jpeg =
