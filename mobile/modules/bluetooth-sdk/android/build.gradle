@@ -108,8 +108,126 @@ if (!sherpaOnnxPom.exists()) {
 """
 }
 
+// HTC VIVE AI Glasses SDK for the VIVE Eagle driver (sgcs/ViveEagle.kt).
+// HTC's SDK is a proprietary download with no public Maven repository, so it is
+// never committed: each developer places it in libs/vive-eagle-sdk/ (gitignored
+// except its README, which says exactly what goes there). It arrives as:
+//   - repository/: a complete local Maven repo HTC generated, with its own POM,
+//     Gradle module metadata and checksums for viveglass_client. Used as is.
+//   - ViveGlassSimulator-release.aar: a loose AAR. AGP rejects raw .aar files
+//     in a library module (see Sherpa above), so it is staged into libs/maven/
+//     with a minimal POM, the same way as Sherpa-ONNX.
+// Both AARs are SHA-256 pinned. When the folder is empty (CI, fresh clones),
+// the build does not fail: it warns and compiles src/viveEagleStub/ instead of
+// the real driver, so an Eagle connection attempt reports a pairing failure.
+def viveSdkVersion = "0.6.1"
+def viveSdkGroup = "com.htc.viveglass.sdk"
+def viveClientArtifact = "viveglass_client"
+def viveClientSha256 = "55c3c321a65495dae2f86ece2a7d8fe3b76d920e79d7680ce121050fa44cd17f"
+def viveSimulatorArtifact = "viveglass_simulator"
+def viveSimulatorSha256 = "b0ce80a746b465aadf3eaaaeef2b5a25a289ad7071b8364caca568358152a955"
+
+def viveSdkDir = file("libs/vive-eagle-sdk")
+def viveSdkRepo = new File(viveSdkDir, "repository")
+def viveClientAar = new File(
+  viveSdkRepo,
+  "${viveSdkGroup.replace('.', '/')}/${viveClientArtifact}/${viveSdkVersion}/${viveClientArtifact}-${viveSdkVersion}.aar"
+)
+def viveSimulatorSourceAar = new File(viveSdkDir, "ViveGlassSimulator-release.aar")
+def viveSdkReadme = "mobile/modules/bluetooth-sdk/android/libs/vive-eagle-sdk/README.md"
+
+def viveSdkAvailable = viveClientAar.exists() && viveSimulatorSourceAar.exists()
+if (!viveSdkAvailable && (viveClientAar.exists() || viveSimulatorSourceAar.exists())) {
+  throw new GradleException(
+    "VIVE AI Glasses SDK is only partly present in ${viveSdkDir.absolutePath}.\n" +
+    "  ${viveClientAar.exists() ? 'found  ' : 'MISSING'} ${viveSdkDir.toPath().relativize(viveClientAar.toPath())}\n" +
+    "  ${viveSimulatorSourceAar.exists() ? 'found  ' : 'MISSING'} ${viveSimulatorSourceAar.name}\n" +
+    "Add the missing file (see ${viveSdkReadme}), or remove both to build without the VIVE Eagle driver."
+  )
+}
+
+if (viveSdkAvailable) {
+  def viveClientActual = sha256OfFile(viveClientAar)
+  if (viveClientActual != viveClientSha256) {
+    throw new GradleException(
+      "VIVE AI Glasses SDK ${viveClientAar.name} SHA-256 mismatch.\n" +
+      "  expected: ${viveClientSha256} (SDK ${viveSdkVersion})\n" +
+      "  actual:   ${viveClientActual}\n" +
+      "Use the ${viveSdkVersion} SDK download (see ${viveSdkReadme}), or update the pinned version and hash in build.gradle."
+    )
+  }
+  def viveSimulatorActual = sha256OfFile(viveSimulatorSourceAar)
+  if (viveSimulatorActual != viveSimulatorSha256) {
+    throw new GradleException(
+      "VIVE AI Glasses SDK ${viveSimulatorSourceAar.name} SHA-256 mismatch.\n" +
+      "  expected: ${viveSimulatorSha256} (SDK ${viveSdkVersion})\n" +
+      "  actual:   ${viveSimulatorActual}\n" +
+      "Use the ${viveSdkVersion} SDK download (see ${viveSdkReadme}), or update the pinned version and hash in build.gradle."
+    )
+  }
+
+  // Stage the simulator next to Sherpa in libs/maven/, recopying when stale.
+  def viveSimulatorRepoDir = new File(
+    sherpaOnnxMavenRoot,
+    "${viveSdkGroup.replace('.', '/')}/${viveSimulatorArtifact}/${viveSdkVersion}"
+  )
+  def viveSimulatorAar = new File(viveSimulatorRepoDir, "${viveSimulatorArtifact}-${viveSdkVersion}.aar")
+  def viveSimulatorPom = new File(viveSimulatorRepoDir, "${viveSimulatorArtifact}-${viveSdkVersion}.pom")
+  if (!viveSimulatorAar.exists() || sha256OfFile(viveSimulatorAar) != viveSimulatorSha256) {
+    viveSimulatorRepoDir.mkdirs()
+    java.nio.file.Files.copy(
+      viveSimulatorSourceAar.toPath(),
+      viveSimulatorAar.toPath(),
+      java.nio.file.StandardCopyOption.REPLACE_EXISTING
+    )
+  }
+  // Minimal POM. viveglass_client is declared separately. The simulator's
+  // optional control panel (showUI) is a Material BottomSheetDialogFragment with
+  // a ConstraintLayout layout, so those two are runtime deps, at the versions
+  // HTC's sample app uses. Runtime scope keeps them off the compile classpath.
+  def viveSimulatorPomText = """<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>${viveSdkGroup}</groupId>
+  <artifactId>${viveSimulatorArtifact}</artifactId>
+  <version>${viveSdkVersion}</version>
+  <packaging>aar</packaging>
+  <dependencies>
+    <dependency>
+      <groupId>com.google.android.material</groupId>
+      <artifactId>material</artifactId>
+      <version>1.12.0</version>
+      <scope>runtime</scope>
+    </dependency>
+    <dependency>
+      <groupId>androidx.constraintlayout</groupId>
+      <artifactId>constraintlayout</artifactId>
+      <version>2.1.4</version>
+      <scope>runtime</scope>
+    </dependency>
+  </dependencies>
+</project>
+"""
+  if (!viveSimulatorPom.exists() || viveSimulatorPom.text != viveSimulatorPomText) {
+    viveSimulatorPom.text = viveSimulatorPomText
+  }
+} else {
+  logger.warn(
+    "WARNING: VIVE AI Glasses SDK not found in ${viveSdkDir.absolutePath}.\n" +
+    "  Building WITHOUT the VIVE Eagle driver: a stub ViveEagle (src/viveEagleStub/) is compiled instead,\n" +
+    "  and connecting a VIVE Eagle fails with VIVE_SDK_NOT_BUNDLED.\n" +
+    "  To build the real driver, see ${viveSdkReadme}."
+  )
+}
+
 repositories {
   maven { url = uri(sherpaOnnxMavenRoot) }
+  if (viveSdkAvailable) {
+    maven {
+      url = uri(viveSdkRepo)
+      content { includeGroup(viveSdkGroup) }
+    }
+  }
   maven { url 'https://jitpack.io' }
 }
 
@@ -287,6 +405,16 @@ android {
   }
 }
 
+// Without the vendored HTC SDK (see the VIVE Eagle block at the top), swap the
+// real driver for the stub. The stub's file has a different name
+// (ViveEagleUnavailable.kt) so this exclude only drops the real one.
+if (!viveSdkAvailable) {
+  android.sourceSets.main.java.srcDir('src/viveEagleStub/java')
+  tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
+    exclude('**/com/mentra/bluetoothsdk/sgcs/ViveEagle.kt')
+  }
+}
+
 dependencies {
   // Expo adapter class is compiled into the MentraOS module, but the bare SDK
   // artifact should not expose Expo as a runtime dependency.
@@ -361,6 +489,14 @@ dependencies {
   } else {
     compileOnly 'com.vuzix:ultralite-sdk-android:1.8'
     compileOnly 'com.squareup.picasso:picasso:2.8'
+  }
+
+  // HTC VIVE AI Glasses SDK for the VIVE Eagle, from the local vendor folder
+  // (see the top of this file). The simulator is ViveEagle's default adapter
+  // (USE_SIMULATOR), so it is needed at runtime in app builds too.
+  if (viveSdkAvailable) {
+    dependencies.add(optionalMentraOsIntegrationDependency, "${viveSdkGroup}:${viveClientArtifact}:${viveSdkVersion}")
+    dependencies.add(optionalMentraOsIntegrationDependency, "${viveSdkGroup}:${viveSimulatorArtifact}:${viveSdkVersion}")
   }
 
   implementation 'com.google.protobuf:protobuf-java:4.32.0'

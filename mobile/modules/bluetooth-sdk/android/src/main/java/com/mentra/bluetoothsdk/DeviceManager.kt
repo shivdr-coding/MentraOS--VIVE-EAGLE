@@ -1393,7 +1393,7 @@ class DeviceManager internal constructor(initializeHardware: Boolean) {
         } else if (wearable.contains(DeviceTypes.NIMO)) {
             sgc = Nimo()
         } else if (wearable.contains(DeviceTypes.EAGLE)) {
-            sgc = ViveEagle()
+            sgc = createOptionalEagleSgc()
         } else if (wearable.contains(DeviceTypes.FRAME)) {
             // sgc = FrameManager()
         }
@@ -1410,6 +1410,16 @@ class DeviceManager internal constructor(initializeHardware: Boolean) {
             }
         } catch (e: LinkageError) {
             Bridge.log("Failed to initialize $deviceType support: ${e.message}")
+            null
+        }
+    }
+
+    // HTC's VIVE SDK is compileOnly in the public SDK artifact, so it may be absent at runtime.
+    private fun createOptionalEagleSgc(): SGCManager? {
+        return try {
+            ViveEagle()
+        } catch (e: LinkageError) {
+            Bridge.log("Failed to initialize ${DeviceTypes.EAGLE} support: ${e.message}")
             null
         }
     }

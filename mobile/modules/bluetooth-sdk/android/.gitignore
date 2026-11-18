@@ -1,1 +1,6 @@
-libs/
+libs/*
+# HTC's VIVE AI Glasses SDK is vendored locally, never committed (proprietary).
+# Only the README that says what to put there is tracked.
+!libs/vive-eagle-sdk/
+libs/vive-eagle-sdk/*
+!libs/vive-eagle-sdk/README.md

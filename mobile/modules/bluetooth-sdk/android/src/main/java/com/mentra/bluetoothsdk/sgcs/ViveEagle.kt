@@ -1,13 +1,8 @@
 package com.mentra.bluetoothsdk.sgcs
 
-// TODO: add the HTC VIVE AI Glasses SDK to mobile/modules/bluetooth-sdk/android/build.gradle
-// once this lands:
-//   implementation("com.htc.viveglass.sdk:viveglass_client:0.6.1")
-//   implementation(files("libs/ViveGlassSimulator-release.aar"))   // simulator, see BUILD MODE
-// HTC does not publish viveglass_client to a public Maven repository: it ships as a local Maven
-// repo (repository/com/htc/viveglass/sdk/viveglass_client/0.6.1/) inside the SDK download from
-// developer.vive.com, and the simulator as a loose AAR. Both need vendoring (or a private repo)
-// before this file compiles.
+// Compiled against HTC's VIVE AI Glasses SDK 0.6.1 (viveglass_client + ViveGlassSimulator),
+// which is not committed: put it in libs/vive-eagle-sdk/ as that folder's README.md says.
+// Without it, build.gradle warns and compiles src/viveEagleStub/ in place of this file.
 //
 // Every HTC signature used below was checked against the 0.6.1 AAR bytecode and HTC's own sample
 // (ViveGlassSample/ViveGlassKitManager.kt), not just the docs.
@@ -302,12 +297,11 @@ class ViveEagle : SGCManager() {
                     ViveGlassSimulator.create(context)
                     simulatorCreated = true
                 }
-                val simulator = ViveGlassSimulator.instance()
                 // The simulator refuses connect() ("Glasses is not power on or put on") unless
-                // it is powered and worn. HTC's sample toggles these from its simulator UI.
-                simulator.setPower(true)
-                simulator.setWear(true)
-                ViveGlass.adapter = simulator
+                // it is powered and worn. Both start true (mPower/mWear in its constructor);
+                // only its own UI (showUI, HTC's sample) changes them. setPower/setWear are
+                // package-private in SDK 0.6.1, so they cannot be called from here anyway.
+                ViveGlass.adapter = ViveGlassSimulator.instance()
                 Bridge.log("$TAG: adapter = ViveGlassSimulator")
             } else {
                 ViveGlass.adapter = ViveGlassKit(context)
@@ -425,11 +419,24 @@ class ViveEagle : SGCManager() {
         Bridge.log("$TAG: ping (isConnected=${adapterReady && viveGlass.isConnected})")
     }
 
-    /** Simulator only: presses the simulated AI button, so the button path can be tested. */
+    /**
+     * Simulator only: presses the simulated AI button, so the button path can be tested.
+     * sendAIButton() is package-private in SDK 0.6.1 (HTC's simulator dialog calls it), so it
+     * is reached by reflection; debug-only, and it just logs if a later SDK renames it.
+     */
     override fun dbg1() {
         if (USE_SIMULATOR && adapterReady) {
             Bridge.log("$TAG: dbg1 -> simulated AI button")
-            mainHandler.post { ViveGlassSimulator.instance().sendAIButton() }
+            mainHandler.post {
+                try {
+                    ViveGlassSimulator::class.java
+                        .getDeclaredMethod("sendAIButton")
+                        .apply { isAccessible = true }
+                        .invoke(ViveGlassSimulator.instance())
+                } catch (e: ReflectiveOperationException) {
+                    Bridge.log("$TAG: simulated AI button unavailable: $e")
+                }
+            }
         }
     }
 
