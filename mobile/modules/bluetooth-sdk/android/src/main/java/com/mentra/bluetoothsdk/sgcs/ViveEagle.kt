@@ -9,12 +9,16 @@ package com.mentra.bluetoothsdk.sgcs
 
 import android.app.Activity
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Matrix
 import android.media.MediaCodec
 import android.media.MediaFormat
 import android.net.Uri
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
+import androidx.exifinterface.media.ExifInterface
 import com.htc.viveglass.sdk.AudioChannel
 import com.htc.viveglass.sdk.AudioStreamingFormat
 import com.htc.viveglass.sdk.CaptureEvent
@@ -43,6 +47,7 @@ import com.mentra.bluetoothsdk.PhotoRequest
 import com.mentra.bluetoothsdk.utils.BlePhotoUploadService
 import com.mentra.bluetoothsdk.utils.ConnTypes
 import com.mentra.bluetoothsdk.utils.DeviceTypes
+import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
@@ -566,9 +571,10 @@ class ViveEagle : SGCManager() {
     }
 
     /**
-     * The Eagle returns HEIC. BlePhotoUploadService decodes anything BitmapFactory can read
-     * (HEIF is supported from Android 9) and re-encodes as JPEG, so the same helpers Mentra
-     * Live uses for its phone-relayed photos handle both the upload and the local-file case.
+     * The Eagle returns HEIC. It is decoded and re-encoded as an upright JPEG here (see
+     * EagleHeic), on a worker thread since the SDK callback thread is HTC's. BlePhotoUploadService
+     * passes JPEG input through unchanged, so the same helpers Mentra Live uses for its
+     * phone-relayed photos then handle both the upload and the local-file case.
      */
     private fun deliverPhoto(request: PhotoRequest, heic: ByteArray) {
         val context =
@@ -579,11 +585,26 @@ class ViveEagle : SGCManager() {
                 return
             }
 
-        if (request.save) saveRawCopy(context, request.requestId, heic)
+        // A plain thread rather than `scope`: disconnect() cancels the scope's children, and a
+        // photo already taken from pendingPhoto must still get a response.
+        Thread({
+            if (request.save) saveRawCopy(context, request.requestId, heic)
+            val jpeg =
+                try {
+                    EagleHeic.toUprightJpeg(heic)
+                } catch (e: Exception) {
+                    Bridge.log("$TAG: HEIC to JPEG failed: ${e.message}")
+                    Bridge.sendPhotoError(request.requestId, "PHONE_DECODE_FAILED", "Could not decode the VIVE Eagle photo: ${e.message}")
+                    return@Thread
+                }
+            deliverJpeg(context, request, jpeg)
+        }, "EaglePhoto").start()
+    }
 
+    private fun deliverJpeg(context: Context, request: PhotoRequest, jpeg: ByteArray) {
         if (request.localFile) {
             BlePhotoUploadService.processAndSavePhoto(
-                heic,
+                jpeg,
                 request.requestId,
                 File(context.cacheDir, LOCAL_PHOTO_DIR),
                 object : BlePhotoUploadService.SaveCallback {
@@ -618,7 +639,7 @@ class ViveEagle : SGCManager() {
             return
         }
         BlePhotoUploadService.processAndUploadPhoto(
-            heic,
+            jpeg,
             request.requestId,
             request.webhookUrl,
             request.authToken,
@@ -994,6 +1015,76 @@ class ViveEagle : SGCManager() {
     override fun requestVersionInfo() {
         Bridge.log("$TAG: requestVersionInfo - not exposed by the VIVE SDK")
     }
+}
+
+// ---------- HEIC photo ----------
+
+/**
+ * HEIC -> upright JPEG. BitmapFactory (HEIF from Android 9) ignores the EXIF orientation, so the
+ * bitmap is rotated before encoding, as HTC's sample does (ViveGlassKitManager.byteToBitmap:
+ * decode, read TAG_ORIENTATION, rotate). The sample handles 90/180/270 only; the mirrored
+ * orientations are handled here too. The output JPEG carries no EXIF, so viewers cannot rotate
+ * it a second time.
+ */
+internal object EagleHeic {
+    private const val JPEG_QUALITY = 90
+
+    fun toUprightJpeg(heic: ByteArray): ByteArray {
+        val decoded =
+            BitmapFactory.decodeByteArray(heic, 0, heic.size)
+                ?: throw IllegalArgumentException("BitmapFactory could not decode ${heic.size} bytes")
+        val orientation = readOrientation(heic)
+        val upright = applyOrientation(decoded, orientation)
+        if (upright !== decoded) decoded.recycle()
+        try {
+            val out = ByteArrayOutputStream()
+            if (!upright.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, out)) {
+                throw IllegalStateException("JPEG encode failed")
+            }
+            Bridge.log(
+                "EAGLE: photo ${upright.width}x${upright.height} orientation=$orientation " +
+                    "HEIC ${heic.size} -> JPEG ${out.size()} bytes"
+            )
+            return out.toByteArray()
+        } finally {
+            upright.recycle()
+        }
+    }
+
+    private fun readOrientation(heic: ByteArray): Int =
+        try {
+            ByteArrayInputStream(heic).use {
+                ExifInterface(it).getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+            }
+        } catch (e: Exception) {
+            Bridge.log("EAGLE: could not read the HEIC orientation: ${e.message}")
+            ExifInterface.ORIENTATION_NORMAL
+        }
+
+    private fun applyOrientation(source: Bitmap, orientation: Int): Bitmap {
+        val transform = orientationTransform(orientation)
+        if (transform.degrees == 0f && !transform.mirror) return source
+        val matrix = Matrix()
+        matrix.setRotate(transform.degrees)
+        if (transform.mirror) matrix.postScale(-1f, 1f)
+        return Bitmap.createBitmap(source, 0, 0, source.width, source.height, matrix, true)
+    }
+
+    /** Rotate clockwise by [degrees], then mirror horizontally when [mirror]. */
+    data class Transform(val degrees: Float, val mirror: Boolean)
+
+    /** EXIF orientation (1..8) to the transform that makes the image upright. */
+    fun orientationTransform(orientation: Int): Transform =
+        when (orientation) {
+            ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> Transform(0f, true)
+            ExifInterface.ORIENTATION_ROTATE_180 -> Transform(180f, false)
+            ExifInterface.ORIENTATION_FLIP_VERTICAL -> Transform(180f, true)
+            ExifInterface.ORIENTATION_TRANSPOSE -> Transform(90f, true)
+            ExifInterface.ORIENTATION_ROTATE_90 -> Transform(90f, false)
+            ExifInterface.ORIENTATION_TRANSVERSE -> Transform(270f, true)
+            ExifInterface.ORIENTATION_ROTATE_270 -> Transform(270f, false)
+            else -> Transform(0f, false) // NORMAL, UNDEFINED, or out of range
+        }
 }
 
 // ---------- AAC decoder ----------
