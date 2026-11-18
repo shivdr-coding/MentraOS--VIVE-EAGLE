@@ -534,7 +534,9 @@ class ViveEagle : SGCManager() {
             val jpeg =
                 try {
                     EagleHeic.toUprightJpeg(heic)
-                } catch (e: Exception) {
+                } catch (e: Throwable) {
+                    // Throwable, not Exception: two full-size 12 MP bitmaps can hit
+                    // OutOfMemoryError, which would otherwise kill this thread and the app.
                     Bridge.log("$TAG: HEIC to JPEG failed: ${e.message}")
                     Bridge.sendPhotoError(request.requestId, "PHONE_DECODE_FAILED", "Could not decode the VIVE Eagle photo: ${e.message}")
                     return@Thread

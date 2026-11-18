@@ -105,6 +105,7 @@ public class Bridge private constructor() {
 
         /** Registers [provider] as the source of [getCurrentActivity]; null clears it. */
         @JvmStatic
+        @Synchronized
         fun setCurrentActivityProvider(provider: (() -> android.app.Activity?)?) {
             currentActivityProvider = provider
         }
