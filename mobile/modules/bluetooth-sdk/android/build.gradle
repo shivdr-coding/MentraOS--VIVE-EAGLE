@@ -116,7 +116,10 @@ if (!sherpaOnnxPom.exists()) {
 //     Gradle module metadata and checksums for viveglass_client. Used as is.
 //   - ViveGlassSimulator-release.aar: a loose AAR. AGP rejects raw .aar files
 //     in a library module (see Sherpa above), so it is staged into libs/maven/
-//     with a minimal POM, the same way as Sherpa-ONNX.
+//     with a minimal POM, the same way as Sherpa-ONNX. Debug builds only: it
+//     carries ~10 MB of sample media plus Material/ConstraintLayout, so release
+//     builds use the real ViveGlassKit adapter and never see it (see the
+//     viveEagleSimulator/viveEagleKit source sets below).
 // Both AARs are SHA-256 pinned. When the folder is empty (CI, fresh clones),
 // the build does not fail: it warns and compiles src/viveEagleStub/ instead of
 // the real driver, so an Eagle connection attempt reports a pairing failure.
@@ -413,6 +416,12 @@ if (!viveSdkAvailable) {
   tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
     exclude('**/com/mentra/bluetoothsdk/sgcs/ViveEagle.kt')
   }
+} else {
+  // With the SDK, ViveEagle.kt takes its HTC adapter from ViveEagleAdapter:
+  // HTC's simulator in debug builds, the real ViveGlassKit in release builds.
+  // Separate source sets so release compiles without the simulator classes.
+  android.sourceSets.debug.java.srcDir('src/viveEagleSimulator/java')
+  android.sourceSets.release.java.srcDir('src/viveEagleKit/java')
 }
 
 dependencies {
@@ -492,11 +501,15 @@ dependencies {
   }
 
   // HTC VIVE AI Glasses SDK for the VIVE Eagle, from the local vendor folder
-  // (see the top of this file). The simulator is ViveEagle's default adapter
-  // (USE_SIMULATOR), so it is needed at runtime in app builds too.
+  // (see the top of this file). The simulator is the debug-build adapter
+  // (src/viveEagleSimulator/), so it is a debug-only dependency: debugImplementation
+  // in app builds, debugCompileOnly for the public Maven artifact.
   if (viveSdkAvailable) {
     dependencies.add(optionalMentraOsIntegrationDependency, "${viveSdkGroup}:${viveClientArtifact}:${viveSdkVersion}")
-    dependencies.add(optionalMentraOsIntegrationDependency, "${viveSdkGroup}:${viveSimulatorArtifact}:${viveSdkVersion}")
+    dependencies.add(
+      publicMavenSdk ? 'debugCompileOnly' : 'debugImplementation',
+      "${viveSdkGroup}:${viveSimulatorArtifact}:${viveSdkVersion}"
+    )
   }
 
   implementation 'com.google.protobuf:protobuf-java:4.32.0'

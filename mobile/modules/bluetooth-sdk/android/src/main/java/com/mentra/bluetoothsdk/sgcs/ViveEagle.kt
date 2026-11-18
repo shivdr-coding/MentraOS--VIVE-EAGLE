@@ -1,8 +1,10 @@
 package com.mentra.bluetoothsdk.sgcs
 
-// Compiled against HTC's VIVE AI Glasses SDK 0.6.1 (viveglass_client + ViveGlassSimulator),
-// which is not committed: put it in libs/vive-eagle-sdk/ as that folder's README.md says.
-// Without it, build.gradle warns and compiles src/viveEagleStub/ in place of this file.
+// Compiled against HTC's VIVE AI Glasses SDK 0.6.1 (viveglass_client, plus ViveGlassSimulator in
+// debug builds), which is not committed: put it in libs/vive-eagle-sdk/ as that folder's
+// README.md says. Without it, build.gradle warns and compiles src/viveEagleStub/ in place of
+// this file. The HTC adapter comes from ViveEagleAdapter: the simulator in debug builds
+// (src/viveEagleSimulator/), the real ViveGlassKit in release builds (src/viveEagleKit/).
 //
 // Every HTC signature used below was checked against the 0.6.1 AAR bytecode and HTC's own sample
 // (ViveGlassSample/ViveGlassKitManager.kt), not just the docs.
@@ -34,11 +36,9 @@ import com.htc.viveglass.sdk.SynthesisEvent
 import com.htc.viveglass.sdk.TranscribedEvent
 import com.htc.viveglass.sdk.ViveGlass
 import com.htc.viveglass.sdk.ViveGlassError
-import com.htc.viveglass.sdk.ViveGlassKit
 import com.htc.viveglass.sdk.client.StreamingBufferCallback
 import com.htc.viveglass.sdk.client.StreamingEventCallback
 import com.htc.viveglass.sdk.client.ViveGlassClientCallback
-import com.htc.viveglass.sdk.simulator.ViveGlassSimulator
 import com.mentra.bluetoothsdk.BluetoothSdkDefaults
 import com.mentra.bluetoothsdk.Bridge
 import com.mentra.bluetoothsdk.DeviceManager
@@ -74,20 +74,6 @@ class ViveEagle : SGCManager() {
     companion object {
         private const val TAG = "EAGLE"
 
-        // ---------------------------------------------------------------------------------
-        // BUILD MODE
-        //
-        // true  = ViveGlass.adapter = ViveGlassSimulator.instance()
-        //         HTC's bundled simulator. Same adapter contract, no hardware and no HTC app
-        //         registration needed, so this path works today. Default for now.
-        // false = ViveGlass.adapter = ViveGlassKit(context)
-        //         The real glasses (paired in HTC's VIVE Connect app). Blocked until HTC
-        //         registers the app: an unregistered package gets ERROR_UNREGISTER_APP from the
-        //         connect handshake (confirmed on the real glasses 2026-11-11, see
-        //         vive-registration-test/run2-logcat.txt and CLAUDE.md).
-        // ---------------------------------------------------------------------------------
-        private const val USE_SIMULATOR = true
-
         // Mic routing. false (default) = stream raw glasses audio and feed it into MentraOS's own
         // PCM pipeline (VAD, wake word, on-device STT, mic_pcm). true = use HTC's own speech
         // recognizer instead and forward its text as local_transcription; no PCM is produced
@@ -109,10 +95,6 @@ class ViveEagle : SGCManager() {
 
         /** MentraOS PCM pipeline format (Bridge.MIC_SAMPLE_RATE, mono, s16le). */
         private const val TARGET_SAMPLE_RATE = 16_000
-
-        // ViveGlassSimulator.create() builds a TextToSpeech and SpeechRecognizer; do it once
-        // per process, on the main thread.
-        @Volatile private var simulatorCreated = false
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -293,25 +275,15 @@ class ViveEagle : SGCManager() {
         DeviceStore.apply("glasses", "connectionState", ConnTypes.DISCONNECTED)
     }
 
-    /** Assigns ViveGlass.adapter. Main thread only (the simulator creates TTS/STT objects). */
+    /** Assigns ViveGlass.adapter. Main thread only (the debug simulator creates TTS/STT objects). */
     private fun ensureAdapter(context: Context): Boolean {
         if (adapterReady) return true
         return try {
-            if (USE_SIMULATOR) {
-                if (!simulatorCreated) {
-                    ViveGlassSimulator.create(context)
-                    simulatorCreated = true
-                }
-                // The simulator refuses connect() ("Glasses is not power on or put on") unless
-                // it is powered and worn. Both start true (mPower/mWear in its constructor);
-                // only its own UI (showUI, HTC's sample) changes them. setPower/setWear are
-                // package-private in SDK 0.6.1, so they cannot be called from here anyway.
-                ViveGlass.adapter = ViveGlassSimulator.instance()
-                Bridge.log("$TAG: adapter = ViveGlassSimulator")
-            } else {
-                ViveGlass.adapter = ViveGlassKit(context)
-                Bridge.log("$TAG: adapter = ViveGlassKit (real glasses)")
-            }
+            ViveGlass.adapter = ViveEagleAdapter.create(context)
+            Bridge.log(
+                "$TAG: adapter = " +
+                    if (ViveEagleAdapter.IS_SIMULATOR) "ViveGlassSimulator (debug build)" else "ViveGlassKit (real glasses)"
+            )
             adapterReady = true
             true
         } catch (e: Exception) {
@@ -424,22 +396,13 @@ class ViveEagle : SGCManager() {
         Bridge.log("$TAG: ping (isConnected=${adapterReady && viveGlass.isConnected})")
     }
 
-    /**
-     * Simulator only: presses the simulated AI button, so the button path can be tested.
-     * sendAIButton() is package-private in SDK 0.6.1 (HTC's simulator dialog calls it), so it
-     * is reached by reflection; debug-only, and it just logs if a later SDK renames it.
-     */
+    /** Debug builds (simulator) only: presses the simulated AI button, to test that path. */
     override fun dbg1() {
-        if (USE_SIMULATOR && adapterReady) {
+        if (ViveEagleAdapter.IS_SIMULATOR && adapterReady) {
             Bridge.log("$TAG: dbg1 -> simulated AI button")
             mainHandler.post {
-                try {
-                    ViveGlassSimulator::class.java
-                        .getDeclaredMethod("sendAIButton")
-                        .apply { isAccessible = true }
-                        .invoke(ViveGlassSimulator.instance())
-                } catch (e: ReflectiveOperationException) {
-                    Bridge.log("$TAG: simulated AI button unavailable: $e")
+                if (!ViveEagleAdapter.pressSimulatedAiButton()) {
+                    Bridge.log("$TAG: simulated AI button unavailable in this SDK version")
                 }
             }
         }
