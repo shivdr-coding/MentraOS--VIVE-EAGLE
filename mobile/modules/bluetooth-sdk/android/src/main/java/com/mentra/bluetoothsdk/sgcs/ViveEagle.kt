@@ -866,8 +866,19 @@ class ViveEagle : SGCManager() {
     }
 
     /**
-     * Speaks through the Eagle's speakers with HTC's TTS. Nothing in SGCManager calls this yet:
-     * MentraOS plays TTS as phone audio routed over Bluetooth.
+     * Speaks through the Eagle's speakers with HTC's TTS. Not wired up, deliberately: MentraOS
+     * never hands an SGC text to speak. Miniapp speech is synthesized on the phone (sherpa TTS
+     * via TTSTools.generateTtsAudio, or cloud audio) and played by the engine's
+     * AudioPlaybackService through the native PCM player, i.e. as phone audio that reaches the
+     * Eagle over its Bluetooth audio link like any headset. SGCManager has no speech method.
+     *
+     * Hook that would be needed to use this instead: an `open fun speakText(text: String,
+     * languageTag: String?): Boolean` on SGCManager (default false = "not handled"), exposed via
+     * DeviceManager and a BluetoothSdkModule AsyncFunction, plus a capability flag in the Eagle
+     * profile that LocalMiniappRuntime / SentenceTtsPipeline check to send sentence text to the
+     * glasses instead of synthesizing PCM, with onTextSpoken mapped to the speaker state events.
+     * That spans the SGC interface, the Expo module and the engine, so it is left for a
+     * dedicated change.
      */
     fun speakText(text: String) {
         if (!adapterReady || !viveGlass.isConnected) {
