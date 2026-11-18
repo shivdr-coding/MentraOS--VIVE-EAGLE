@@ -28,6 +28,7 @@ import com.mentra.bluetoothsdk.sgcs.MentraNex
 import com.mentra.bluetoothsdk.sgcs.Nimo
 import com.mentra.bluetoothsdk.sgcs.SGCManager
 import com.mentra.bluetoothsdk.sgcs.Simulated
+import com.mentra.bluetoothsdk.sgcs.ViveEagle
 import com.mentra.bluetoothsdk.utils.ControllerTypes
 import com.mentra.bluetoothsdk.utils.DeviceTypes
 import com.mentra.bluetoothsdk.utils.MicMap
@@ -1391,6 +1392,8 @@ class DeviceManager internal constructor(initializeHardware: Boolean) {
             sgc = createOptionalMach1Sgc(DeviceTypes.Z100)
         } else if (wearable.contains(DeviceTypes.NIMO)) {
             sgc = Nimo()
+        } else if (wearable.contains(DeviceTypes.EAGLE)) {
+            sgc = ViveEagle()
         } else if (wearable.contains(DeviceTypes.FRAME)) {
             // sgc = FrameManager()
         }
