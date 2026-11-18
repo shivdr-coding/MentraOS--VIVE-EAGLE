@@ -1016,7 +1016,8 @@ internal object EagleHeic {
             ExifInterface.ORIENTATION_NORMAL
         }
 
-    private fun applyOrientation(source: Bitmap, orientation: Int): Bitmap {
+    // internal, not private, so the unit tests can check the pixels it produces.
+    internal fun applyOrientation(source: Bitmap, orientation: Int): Bitmap {
         val transform = orientationTransform(orientation)
         if (transform.degrees == 0f && !transform.mirror) return source
         val matrix = Matrix()
