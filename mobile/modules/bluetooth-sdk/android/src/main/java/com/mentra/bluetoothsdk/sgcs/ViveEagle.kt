@@ -1111,10 +1111,10 @@ private class EagleAacDecoder(private val onPcm: (ByteArray) -> Unit) {
     private var outRate = 0
     private var outChannels = 0
 
-    // Linear resampler state carried across buffers.
-    private var resamplePos = 0.0
-    private var lastSample = 0
-    private var haveLastSample = false
+    /** Downmix + anti-aliased resample to 16 kHz, state carried across buffers. */
+    private val resampler = ViveEagleResampler(TARGET_RATE)
+    /** Reused copy of each decoder output buffer. */
+    private var pcmScratch = ByteArray(0)
 
     private var loggedFirstPcm = false
 
@@ -1226,11 +1226,11 @@ private class EagleAacDecoder(private val onPcm: (ByteArray) -> Unit) {
                 outIdx >= 0 -> {
                     val buf = c.getOutputBuffer(outIdx)
                     if (buf != null && info.size > 0) {
-                        val pcm = ByteArray(info.size)
+                        if (pcmScratch.size < info.size) pcmScratch = ByteArray(info.size)
                         buf.position(info.offset)
                         buf.limit(info.offset + info.size)
-                        buf.get(pcm)
-                        val out = toMono16k(pcm)
+                        buf.get(pcmScratch, 0, info.size)
+                        val out = resampler.process(pcmScratch, info.size, outRate, outChannels)
                         if (out.isNotEmpty()) {
                             if (!loggedFirstPcm) {
                                 loggedFirstPcm = true
@@ -1249,66 +1249,6 @@ private class EagleAacDecoder(private val onPcm: (ByteArray) -> Unit) {
                 else -> return // INFO_TRY_AGAIN_LATER and anything else
             }
         }
-    }
-
-    /**
-     * Downmix to mono and linearly resample to 16 kHz, carrying position across buffers.
-     * First pass: no anti-alias filter when downsampling from 44.1/48 kHz. Speech mostly sits
-     * below 8 kHz, but a proper low-pass would be better if STT quality suffers.
-     */
-    private fun toMono16k(pcm: ByteArray): ByteArray {
-        val channels = if (outChannels > 0) outChannels else 1
-        val frames = pcm.size / (2 * channels)
-        if (frames == 0 || outRate <= 0) return ByteArray(0)
-
-        val mono = IntArray(frames)
-        var p = 0
-        for (f in 0 until frames) {
-            var sum = 0
-            for (ch in 0 until channels) {
-                val lo = pcm[p].toInt() and 0xFF
-                val hi = pcm[p + 1].toInt() // sign-extended
-                sum += (hi shl 8) or lo
-                p += 2
-            }
-            mono[f] = sum / channels
-        }
-
-        if (outRate == TARGET_RATE) return toBytes(mono, mono.size)
-
-        // ext[0] is the last sample of the previous buffer, so interpolation spans the seam.
-        if (!haveLastSample) {
-            lastSample = mono[0]
-            haveLastSample = true
-        }
-        val ext = IntArray(frames + 1)
-        ext[0] = lastSample
-        System.arraycopy(mono, 0, ext, 1, frames)
-
-        val step = outRate.toDouble() / TARGET_RATE
-        val out = IntArray((frames / step).toInt() + 2)
-        var n = 0
-        var pos = resamplePos
-        val lastIndex = ext.size - 1
-        while (pos < lastIndex && n < out.size) {
-            val i = pos.toInt()
-            val frac = pos - i
-            out[n++] = (ext[i] + (ext[i + 1] - ext[i]) * frac).toInt()
-            pos += step
-        }
-        resamplePos = maxOf(0.0, pos - lastIndex)
-        lastSample = ext[lastIndex]
-        return toBytes(out, n)
-    }
-
-    private fun toBytes(samples: IntArray, count: Int): ByteArray {
-        val out = ByteArrayOutputStream(count * 2)
-        for (k in 0 until count) {
-            val s = samples[k].coerceIn(-32768, 32767)
-            out.write(s and 0xFF)
-            out.write((s shr 8) and 0xFF)
-        }
-        return out.toByteArray()
     }
 
     private fun sampleRateForIndex(index: Int): Int =
