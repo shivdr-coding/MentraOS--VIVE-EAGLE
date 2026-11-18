@@ -133,6 +133,9 @@ private inline fun <
 class BluetoothSdkModule : Module() {
     private var sdk: MentraBluetoothSdk? = null
     private var deviceManager: DeviceManager? = null
+    // Lets native drivers reach the foreground Activity (Bridge.getCurrentActivity), e.g. the
+    // VIVE Eagle's HTC permission prompt. Evaluated on each call, so it tracks the live Activity.
+    private val currentActivityProvider: () -> android.app.Activity? = { appContext.currentActivity }
     private val logForwarding = LogForwardingBudget()
     private val sdkListener =
             object : MentraBluetoothSdkListener {
@@ -435,6 +438,7 @@ class BluetoothSdkModule : Module() {
                             sdkListener,
                     )
             deviceManager = DeviceManager.getInstance()
+            Bridge.setCurrentActivityProvider(currentActivityProvider)
             val activity = appContext.currentActivity
             val activityIsResumed =
                     (activity as? LifecycleOwner)
@@ -458,6 +462,7 @@ class BluetoothSdkModule : Module() {
                     "BluetoothSdkModule",
                     "module_destroy"
             )
+            Bridge.clearCurrentActivityProvider(currentActivityProvider)
             sdk?.close()
             PcmStreamManager.abortAll()
             sdk = null

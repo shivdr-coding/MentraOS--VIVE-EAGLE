@@ -99,6 +99,40 @@ public class Bridge private constructor() {
             return appContext ?: throw IllegalStateException("Bridge not initialized with context")
         }
 
+        // Host-supplied lookup of the current foreground Activity (the Expo module passes
+        // appContext.currentActivity). Optional: nothing sets it in hosts that do not need it.
+        @Volatile private var currentActivityProvider: (() -> android.app.Activity?)? = null
+
+        /** Registers [provider] as the source of [getCurrentActivity]; null clears it. */
+        @JvmStatic
+        fun setCurrentActivityProvider(provider: (() -> android.app.Activity?)?) {
+            currentActivityProvider = provider
+        }
+
+        /** Clears the provider only if it is still [provider], so a newer host keeps its own. */
+        @JvmStatic
+        @Synchronized
+        fun clearCurrentActivityProvider(provider: () -> android.app.Activity?) {
+            if (currentActivityProvider === provider) currentActivityProvider = null
+        }
+
+        /**
+         * The current foreground Activity, for the few SDK calls that need one (for example a
+         * vendor permission prompt): the host provider's answer, else the bridge context when
+         * it is itself an Activity, else null.
+         */
+        @JvmStatic
+        fun getCurrentActivity(): android.app.Activity? {
+            val fromProvider =
+                    try {
+                        currentActivityProvider?.invoke()
+                    } catch (e: Exception) {
+                        Log.w(TAG, "currentActivityProvider failed: ${e.message}")
+                        null
+                    }
+            return fromProvider ?: (appContext as? android.app.Activity)
+        }
+
         /** Log a message and send it to JavaScript */
         @JvmStatic
         fun log(message: String) {

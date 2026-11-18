@@ -451,10 +451,11 @@ class ViveEagle : SGCManager() {
     // Permissions
     //
     // HTC gates camera and microphone behind its own permission (checkPermission /
-    // requestPermission). requestPermission needs an Activity, which an SGC normally does not
-    // have; it is only attempted when the bridge context happens to be one. Otherwise the
-    // request fails and the permission has to be granted first (in VIVE Connect for the real
-    // glasses).
+    // requestPermission). requestPermission needs an Activity, which an SGC does not own: it
+    // comes from Bridge.getCurrentActivity() (the Expo module's appContext.currentActivity,
+    // else the bridge context if that is an Activity). The current request still fails; the
+    // prompt's result arrives in onPermissionResult and the caller retries. With no foreground
+    // Activity the permission has to be granted first (in VIVE Connect for the real glasses).
     // =====================================================================================
 
     private fun hasPermission(permission: Permission): Boolean {
@@ -467,19 +468,20 @@ class ViveEagle : SGCManager() {
             }
         if (result == PermissionResult.GRANT) return true
         Bridge.log("$TAG: $permission not granted ($result)")
-        val activity =
+        val activity: Activity? = Bridge.getCurrentActivity()
+        if (activity == null || activity.isFinishing || activity.isDestroyed) {
+            Bridge.log(
+                "$TAG: cannot ask for $permission: no foreground Activity (app in background or " +
+                    "host registered no activity provider); grant it in VIVE Connect, then retry"
+            )
+            return false
+        }
+        Bridge.log("$TAG: requesting $permission through ${activity.javaClass.simpleName}")
+        mainHandler.post {
             try {
-                Bridge.getContext() as? Activity
-            } catch (_: IllegalStateException) {
-                null
-            }
-        if (activity != null) {
-            mainHandler.post {
-                try {
-                    viveGlass.requestPermission(activity, permission)
-                } catch (e: Exception) {
-                    Bridge.log("$TAG: requestPermission($permission) failed: ${e.message}")
-                }
+                viveGlass.requestPermission(activity, permission)
+            } catch (e: Exception) {
+                Bridge.log("$TAG: requestPermission($permission) failed: ${e.message}")
             }
         }
         return false
